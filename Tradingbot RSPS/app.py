@@ -1,8 +1,10 @@
-import os
 import threading
 
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
+from flask import (
+    Flask,
+    request,
+    jsonify
+)
 
 from config import (
     WEBHOOK_SECRET,
@@ -25,12 +27,9 @@ from engine.season_monitor import (
     SeasonMonitor
 )
 
-
-# =========================================================
-# ENVIRONMENT
-# =========================================================
-
-load_dotenv()
+from engine.rebalance_worker import (
+    RebalanceWorker
+)
 
 
 # =========================================================
@@ -41,24 +40,20 @@ app = Flask(__name__)
 
 
 # =========================================================
-# RSPS STATE
+# STATE
 # =========================================================
 
 state = load_state()
 
 
 # =========================================================
-# PORTFOLIO MANAGER
+# MANAGERS
 # =========================================================
 
 portfolio_manager = (
     PortfolioManager()
 )
 
-
-# =========================================================
-# SIGNAL MANAGER
-# =========================================================
 
 signal_manager = (
     SignalManager(
@@ -68,9 +63,15 @@ signal_manager = (
 )
 
 
-# =========================================================
-# ETH SEASON MONITOR
-# =========================================================
+rebalance_worker = (
+    RebalanceWorker(
+        portfolio_manager=
+            portfolio_manager,
+        state_provider=
+            signal_manager.get_state_snapshot
+    )
+)
+
 
 season_monitor = (
     SeasonMonitor(
@@ -81,266 +82,20 @@ season_monitor = (
 
 
 # =========================================================
-# STARTUP RECONCILIATION
+# BACKGROUND SERVICES
 # =========================================================
 
-def reconcile_on_startup():
+background_services_started = False
 
-    print(
-        "\n"
-        "========================================"
-    )
 
-    print(
-        "       STARTUP PORTFOLIO CHECK"
-    )
+def start_background_services():
 
-    print(
-        "========================================"
-    )
+    global background_services_started
 
-    # -----------------------------------------------------
-    # TRADING DISABLED
-    # -----------------------------------------------------
-
-    if not TRADING_ENABLED:
-
-        print(
-            "Trading is disabled."
-        )
-
-        print(
-            "Startup rebalance skipped."
-        )
-
+    if background_services_started:
         return
 
-    # -----------------------------------------------------
-    # SIGNALS NOT READY
-    # -----------------------------------------------------
-
-    if not state.all_signals_ready():
-
-        print(
-            "Not all RSPS signals are available."
-        )
-
-        print(
-            "Startup rebalance skipped."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # REBALANCE
-    # -----------------------------------------------------
-
-    print(
-        "Trading enabled."
-    )
-
-    print(
-        "Reconciling Bybit positions "
-        "with saved RSPS state..."
-    )
-
-    try:
-
-        success = (
-            portfolio_manager.rebalance(
-                state=state,
-                dry_run=False
-            )
-        )
-
-    except Exception as error:
-
-        print(
-            "\n===== STARTUP REBALANCE ERROR ====="
-        )
-
-        print(
-            repr(error)
-        )
-
-        return
-
-    if success:
-
-        print(
-            "\n===== STARTUP REBALANCE COMPLETE ====="
-        )
-
-    else:
-
-        print(
-            "\n===== STARTUP REBALANCE FAILED ====="
-        )
-
-
-# =========================================================
-# HEALTH CHECK
-# =========================================================
-
-@app.route(
-    "/",
-    methods=["GET"]
-)
-def home():
-
-    return jsonify({
-        "status": "online",
-        "bot": "RSPS",
-        "trading_enabled":
-            TRADING_ENABLED,
-        "signals_ready":
-            state.all_signals_ready()
-    })
-
-
-# =========================================================
-# WEBHOOK
-# =========================================================
-
-@app.route(
-    "/webhook",
-    methods=["POST"]
-)
-def webhook():
-
-    try:
-
-        # -------------------------------------------------
-        # PARSE JSON
-        # -------------------------------------------------
-
-        data = request.get_json(
-            silent=True
-        )
-
-        if data is None:
-
-            return jsonify({
-                "status": "error",
-                "message": "Invalid JSON"
-            }), 400
-
-        # -------------------------------------------------
-        # CHECK SECRET
-        # -------------------------------------------------
-
-        received_secret = (
-            data.get(
-                "secret"
-            )
-        )
-
-        if WEBHOOK_SECRET is None:
-
-            print(
-                "\n===== WEBHOOK_SECRET NOT CONFIGURED ====="
-            )
-
-            return jsonify({
-                "status": "error",
-                "message":
-                    "Webhook secret not configured"
-            }), 500
-
-        if (
-            received_secret
-            !=
-            WEBHOOK_SECRET
-        ):
-
-            print(
-                "\n===== INVALID WEBHOOK SECRET ====="
-            )
-
-            return jsonify({
-                "status": "error",
-                "message": "Unauthorized"
-            }), 401
-
-        # -------------------------------------------------
-        # PROCESS SIGNAL
-        # -------------------------------------------------
-
-        result = (
-            signal_manager.process_payload(
-                data
-            )
-        )
-
-        # -------------------------------------------------
-        # REBALANCE FAILURE
-        # -------------------------------------------------
-
-        if not result[
-            "success"
-        ]:
-
-            return jsonify(
-                result
-            ), 500
-
-        # -------------------------------------------------
-        # SUCCESS
-        # -------------------------------------------------
-
-        return jsonify(
-            result
-        ), 200
-
-    # =====================================================
-    # VALIDATION ERROR
-    # =====================================================
-
-    except ValueError as error:
-
-        print(
-            "\n===== WEBHOOK VALIDATION ERROR ====="
-        )
-
-        print(
-            str(error)
-        )
-
-        return jsonify({
-            "status": "error",
-            "message": str(error)
-        }), 400
-
-    # =====================================================
-    # UNEXPECTED ERROR
-    # =====================================================
-
-    except Exception as error:
-
-        print(
-            "\n===== WEBHOOK ERROR ====="
-        )
-
-        print(
-            repr(error)
-        )
-
-        return jsonify({
-            "status": "error",
-            "message":
-                "Internal server error"
-        }), 500
-
-
-# =========================================================
-# START BOT
-# =========================================================
-
-if __name__ == "__main__":
-
-    # -----------------------------------------------------
-    # PRINT STARTUP STATE
-    # -----------------------------------------------------
+    background_services_started = True
 
     print(
         "\n"
@@ -366,7 +121,13 @@ if __name__ == "__main__":
     )
 
     # -----------------------------------------------------
-    # START ETH SEASON MONITOR
+    # REBALANCE WORKER
+    # -----------------------------------------------------
+
+    rebalance_worker.start()
+
+    # -----------------------------------------------------
+    # SEASON MONITOR
     # -----------------------------------------------------
 
     season_thread = threading.Thread(
@@ -377,14 +138,239 @@ if __name__ == "__main__":
     season_thread.start()
 
     # -----------------------------------------------------
-    # STARTUP PORTFOLIO RECONCILIATION
+    # STARTUP RECONCILIATION
     # -----------------------------------------------------
 
-    reconcile_on_startup()
+    print(
+        "\n"
+        "========================================"
+    )
 
-    # -----------------------------------------------------
-    # START FLASK
-    # -----------------------------------------------------
+    print(
+        "       STARTUP PORTFOLIO CHECK"
+    )
+
+    print(
+        "========================================"
+    )
+
+    if not TRADING_ENABLED:
+
+        print(
+            "Trading disabled."
+        )
+
+        print(
+            "Startup rebalance skipped."
+        )
+
+    elif not (
+        state.all_signals_ready()
+    ):
+
+        print(
+            "Signals not ready."
+        )
+
+        print(
+            "Startup rebalance skipped."
+        )
+
+    else:
+
+        rebalance_worker.request_rebalance(
+            reason="startup_reconciliation"
+        )
+
+
+# =========================================================
+# START SERVICES
+# =========================================================
+#
+# IMPORTANT:
+#
+# This executes when Gunicorn imports app:app.
+# It is therefore NOT inside __main__.
+#
+# We run exactly one Gunicorn worker.
+# =========================================================
+
+start_background_services()
+
+
+# =========================================================
+# HEALTH
+# =========================================================
+
+@app.route(
+    "/",
+    methods=["GET"]
+)
+def home():
+
+    return jsonify({
+        "status":
+            "online",
+        "bot":
+            "RSPS",
+        "trading_enabled":
+            TRADING_ENABLED,
+        "signals_ready":
+            state.all_signals_ready()
+    })
+
+
+# =========================================================
+# WEBHOOK
+# =========================================================
+
+@app.route(
+    "/webhook",
+    methods=["POST"]
+)
+def webhook():
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        )
+
+        if data is None:
+
+            return jsonify({
+                "status":
+                    "error",
+                "message":
+                    "Invalid JSON"
+            }), 400
+
+        # -------------------------------------------------
+        # SECRET
+        # -------------------------------------------------
+
+        received_secret = (
+            data.get(
+                "secret"
+            )
+        )
+
+        if WEBHOOK_SECRET is None:
+
+            return jsonify({
+                "status":
+                    "error",
+                "message":
+                    "Webhook secret not configured"
+            }), 500
+
+        if (
+            received_secret
+            !=
+            WEBHOOK_SECRET
+        ):
+
+            return jsonify({
+                "status":
+                    "error",
+                "message":
+                    "Unauthorized"
+            }), 401
+
+        # -------------------------------------------------
+        # SAVE SIGNAL
+        # -------------------------------------------------
+
+        result = (
+            signal_manager.process_payload(
+                data
+            )
+        )
+
+        # -------------------------------------------------
+        # QUEUE EXECUTION
+        # -------------------------------------------------
+
+        if result.get(
+            "rebalance_required",
+            False
+        ):
+
+            queued = (
+                rebalance_worker.request_rebalance(
+                    reason=(
+                        "TradingView: "
+                        f"{result.get('signal')}"
+                    )
+                )
+            )
+
+            if queued:
+
+                result[
+                    "status"
+                ] = "rebalance_queued"
+
+            else:
+
+                result[
+                    "status"
+                ] = "rebalance_already_queued"
+
+        # Don't expose internal helper flag.
+        result.pop(
+            "rebalance_required",
+            None
+        )
+
+        # -------------------------------------------------
+        # FAST HTTP RESPONSE
+        # -------------------------------------------------
+
+        return jsonify(
+            result
+        ), 200
+
+    except ValueError as error:
+
+        print(
+            "\n===== WEBHOOK VALIDATION ERROR ====="
+        )
+
+        print(
+            str(error)
+        )
+
+        return jsonify({
+            "status":
+                "error",
+            "message":
+                str(error)
+        }), 400
+
+    except Exception as error:
+
+        print(
+            "\n===== WEBHOOK ERROR ====="
+        )
+
+        print(
+            repr(error)
+        )
+
+        return jsonify({
+            "status":
+                "error",
+            "message":
+                "Internal server error"
+        }), 500
+
+
+# =========================================================
+# LOCAL DEVELOPMENT
+# =========================================================
+
+if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
@@ -392,3 +378,4 @@ if __name__ == "__main__":
         debug=True,
         use_reloader=False
     )
+    

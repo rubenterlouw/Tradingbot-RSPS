@@ -1,3 +1,4 @@
+import copy
 from threading import Lock
 
 from config import TRADING_ENABLED
@@ -6,10 +7,6 @@ from engine.portfolio_state_store import (
     save_state
 )
 
-
-# =========================================================
-# TRADINGVIEW SIGNAL DEFINITIONS
-# =========================================================
 
 SIGNAL_DEFINITIONS = {
 
@@ -51,25 +48,34 @@ SIGNAL_DEFINITIONS = {
 }
 
 
-# =========================================================
-# SIGNAL MANAGER
-# =========================================================
-
 class SignalManager:
 
     def __init__(
         self,
         state,
-        portfolio_manager
+        portfolio_manager=None
     ):
 
         self.state = state
 
+        # Kept for compatibility with our previous app.py
         self.portfolio_manager = (
             portfolio_manager
         )
 
         self.lock = Lock()
+
+    # =====================================================
+    # STATE SNAPSHOT
+    # =====================================================
+
+    def get_state_snapshot(self):
+
+        with self.lock:
+
+            return copy.deepcopy(
+                self.state
+            )
 
     # =====================================================
     # IDENTIFY SIGNAL
@@ -112,7 +118,7 @@ class SignalManager:
         return matches[0]
 
     # =====================================================
-    # VALIDATE SIGNAL VALUE
+    # VALIDATE VALUE
     # =====================================================
 
     def validate_value(
@@ -180,7 +186,7 @@ class SignalManager:
             )
 
             # ---------------------------------------------
-            # DUPLICATE PROTECTION
+            # DUPLICATE
             # ---------------------------------------------
 
             if self.state.is_duplicate(
@@ -197,11 +203,14 @@ class SignalManager:
 
                 return {
                     "success": True,
-                    "status": "duplicate_ignored"
+                    "status":
+                        "duplicate_ignored",
+                    "rebalance_required":
+                        False
                 }
 
             # ---------------------------------------------
-            # IDENTIFY SIGNAL
+            # IDENTIFY
             # ---------------------------------------------
 
             signal_name = (
@@ -223,7 +232,7 @@ class SignalManager:
             )
 
             # ---------------------------------------------
-            # PARSE VALUES
+            # PARSE
             # ---------------------------------------------
 
             try:
@@ -274,17 +283,13 @@ class SignalManager:
             )
 
             # ---------------------------------------------
-            # PRINT UPDATE
+            # PRINT
             # ---------------------------------------------
 
             old_signal = (
                 self.state.get_signal(
                     signal_name
                 )
-            )
-
-            old_value = (
-                old_signal.value
             )
 
             print(
@@ -305,7 +310,7 @@ class SignalManager:
             )
 
             print(
-                f"Old value: {old_value}"
+                f"Old value: {old_signal.value}"
             )
 
             print(
@@ -321,7 +326,7 @@ class SignalManager:
             )
 
             # ---------------------------------------------
-            # UPDATE STATE
+            # UPDATE
             # ---------------------------------------------
 
             self.state.update_signal(
@@ -333,71 +338,50 @@ class SignalManager:
                 signal_id=signal_id
             )
 
+            # Remember it immediately.
+            #
+            # If the server dies after HTTP 200 but before
+            # execution, startup reconciliation will later
+            # restore the portfolio from this saved state.
+            self.state.remember_signal(
+                signal_id
+            )
+
             save_state(
                 self.state
             )
 
             # ---------------------------------------------
-            # WAIT UNTIL ALL SIX SIGNALS EXIST
+            # NOT READY
             # ---------------------------------------------
 
             if not (
                 self.state.all_signals_ready()
             ):
 
-                print(
-                    "\n===== WAITING FOR REMAINING SIGNALS ====="
-                )
-
-                self.state.remember_signal(
-                    signal_id
-                )
-
-                save_state(
-                    self.state
-                )
-
                 return {
                     "success": True,
                     "status":
                         "signal_saved_waiting",
                     "signal":
-                        signal_name
+                        signal_name,
+                    "rebalance_required":
+                        False
                 }
 
             # ---------------------------------------------
-            # MASTER TRADING SWITCH
+            # TRADING DISABLED
             # ---------------------------------------------
 
             if not TRADING_ENABLED:
 
                 print(
-                    "\n"
-                    "========================================"
+                    "\n===== TRADING DISABLED ====="
                 )
 
                 print(
-                    "          TRADING DISABLED"
-                )
-
-                print(
-                    "========================================"
-                )
-
-                print(
-                    "Signal state updated and saved."
-                )
-
-                print(
-                    "No Bybit orders will be placed."
-                )
-
-                self.state.remember_signal(
-                    signal_id
-                )
-
-                save_state(
-                    self.state
+                    "Signal saved. "
+                    "No order execution."
                 )
 
                 return {
@@ -407,57 +391,23 @@ class SignalManager:
                     "signal":
                         signal_name,
                     "value":
-                        value
+                        value,
+                    "rebalance_required":
+                        False
                 }
 
             # ---------------------------------------------
-            # REBALANCE
+            # BACKGROUND REBALANCE REQUIRED
             # ---------------------------------------------
-
-            print(
-                "\n===== RECALCULATING PORTFOLIO ====="
-            )
-
-            success = (
-                self.portfolio_manager.rebalance(
-                    state=self.state,
-                    dry_run=False
-                )
-            )
-
-            # ---------------------------------------------
-            # FAILED
-            # ---------------------------------------------
-
-            if not success:
-
-                print(
-                    "\n===== SIGNAL REBALANCE FAILED ====="
-                )
-
-                return {
-                    "success": False,
-                    "status":
-                        "rebalance_failed",
-                    "signal":
-                        signal_name
-                }
-
-            # ---------------------------------------------
-            # SUCCESS
-            # ---------------------------------------------
-
-            self.state.remember_signal(
-                signal_id
-            )
-
-            save_state(
-                self.state
-            )
 
             return {
                 "success": True,
-                "status": "rebalanced",
-                "signal": signal_name,
-                "value": value
+                "status":
+                    "signal_saved",
+                "signal":
+                    signal_name,
+                "value":
+                    value,
+                "rebalance_required":
+                    True
             }
